@@ -1,0 +1,11 @@
+{
+  "modelid": "14361131-a62b-4c34-b22a-33893847aea3",
+  "ownerid": "14361131-a62b-4c34-b22a-33893847aea3",
+  "placement": {
+    "clusterID": "group1-cluster",
+    "node": "group1-node2",
+    "continuum": "edge"
+  },
+  "deployment_id": "",
+  "inference_data": 0
+}
