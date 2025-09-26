@@ -1,0 +1,73 @@
+{
+  "modelname": "HistGradientBoostingRegressor",
+  "modelkind": "Regressor",
+  "hyperparameter": [
+    {
+      "parameter": "string",
+      "value": 0
+    }
+  ],
+  "modelperformance": [
+    {
+      "metric": "mae",
+      "order": 1,
+      "threshold": 89
+    }
+  ],
+  "trainingresource": [
+    {
+      "resource_name": "string",
+      "value": 0,
+      "deploy": "string"
+    }
+  ],
+  "runresource": [
+    {
+      "resource_name": "string",
+      "value": 0,
+      "deploy": "string"
+    }
+  ],
+  "featurelist": [
+    {
+      "feature_name": "time",
+      "type": "cat",
+      "kind": 0,
+      "units": 0
+    },
+    {
+      "feature_name": "frame_classify_latency",
+      "type": "cont",
+      "kind": 1,
+      "units": 0
+    },
+    {
+      "feature_name": "mls-compute-vm3_cpu_avg",
+      "type": "cont",
+      "kind": 0,
+      "units": 0
+    },
+    {
+      "feature_name": "mls-compute-vm3_free_memory",
+      "type": "cont",
+      "kind": 0,
+      "units": 0
+    }
+  ],
+  "inference": [
+    {
+      "type": "string",
+      "value": "string"
+    }
+  ],
+  "modeltags": [
+    "regression",
+    "fast"
+  ],
+  "drift_detection": [
+    {
+      "is_true": 1,
+      "method": 0
+    }
+  ]
+}
