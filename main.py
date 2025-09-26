@@ -8,16 +8,28 @@ import time
 import random
 
 # Configurazione
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = torch.device('mps')
 SEQ_LENGTH = 20
 PRED_HORIZON = 10
 HIDDEN_SIZE = 64
 NUM_LAYERS = 2
 LEARNING_RATE = 0.001
-EPOCHS = 100
+EPOCHS = 1000
 BATCH_SIZE = 32
-THRESHOLD_FPS = 30  # FPS minimo accettabile
-NODE_SWITCH_COOLDOWN = 5  # secondi prima di poter cambiare nodo
+
+# === CONFIGURAZIONE GESTIONE NODI ===
+THRESHOLD_FPS_CRITICAL = 5   # Soglia critica - sotto questa usiamo nodo 2 immediatamente
+THRESHOLD_FPS_LOW = 10          # Soglia bassa - consideriamo switch a nodo 2
+THRESHOLD_FPS_GOOD = 15       # Soglia buona - possiamo tornare a nodo 1
+
+# === CONFIGURAZIONE COSTI NODO 2 ===
+NODE2_MAX_TIME_PER_HOUR = 300    # Massimo 5 minuti/ora su nodo 2 (costoso)
+NODE2_MAX_CONSECUTIVE_TIME = 60   # Massimo 1 minuto consecutivo su nodo 2
+NODE2_COST_PER_SECOND = 0.10     # Costo in € per secondo
+NODE2_DAILY_BUDGET = 50.0        # Budget giornaliero in €
+
+NODE_SWITCH_COOLDOWN = 10     # secondi prima di poter cambiare nodo (aumentato)
+PERFORMANCE_CHECK_INTERVAL = 5 # ogni quanti secondi verificare performance
 
 def create_sequences_multi_step(data, seq_length, pred_horizon=10):
     """
@@ -213,66 +225,173 @@ def train_model(X_train, y_train, X_val, y_val, input_size):
     
     return model, train_losses, val_losses
 
-def decide_node(fps_prediction, threshold_fps, current_node, time_on_node, available_nodes=None):
+class CostManager:
+    """Gestisce i costi e l'utilizzo del nodo 2"""
+    
+    def __init__(self):
+        self.reset_daily_stats()
+        self.hour_usage = {}  # utilizzo per ora
+        self.consecutive_time_on_node2 = 0
+        
+    def reset_daily_stats(self):
+        """Reset statistiche giornaliere"""
+        self.daily_cost = 0.0
+        self.daily_node2_time = 0
+        self.current_hour = None
+        
+    def can_use_node2(self, fps_prediction, current_time_on_node2=0):
+        """Verifica se possiamo usare il nodo 2 considerando i vincoli di costo"""
+        current_hour = time.strftime("%H")
+        
+        # Inizializza utilizzo orario se necessario
+        if current_hour not in self.hour_usage:
+            self.hour_usage[current_hour] = 0
+            
+        # Check budget giornaliero
+        if self.daily_cost >= NODE2_DAILY_BUDGET:
+            return False, "💰 Budget giornaliero esaurito"
+            
+        # Check utilizzo orario
+        if self.hour_usage[current_hour] >= NODE2_MAX_TIME_PER_HOUR:
+            return False, f"⏱️ Utilizzo orario massimo raggiunto ({NODE2_MAX_TIME_PER_HOUR}s/h)"
+            
+        # Check tempo consecutivo
+        if self.consecutive_time_on_node2 >= NODE2_MAX_CONSECUTIVE_TIME:
+            return False, f"⏳ Tempo consecutivo massimo raggiunto ({NODE2_MAX_CONSECUTIVE_TIME}s)"
+            
+        # Check soglia critica - in questo caso forziamo l'uso
+        if fps_prediction < THRESHOLD_FPS_CRITICAL:
+            return True, "🚨 FPS critico - switch forzato a nodo 2"
+            
+        # Check soglia bassa - switch solo se abbiamo budget
+        if fps_prediction < THRESHOLD_FPS_LOW:
+            remaining_budget = NODE2_DAILY_BUDGET - self.daily_cost
+            estimated_cost = NODE2_COST_PER_SECOND * 30  # stima 30 secondi
+            if estimated_cost <= remaining_budget:
+                return True, f"⚠️ FPS basso - switch economico (costo stimato: €{estimated_cost:.2f})"
+            else:
+                return False, f"💸 FPS basso ma budget insufficiente (rimangono €{remaining_budget:.2f})"
+                
+        return False, "✅ FPS accettabile - resta su nodo 1"
+        
+    def update_usage(self, node_name, seconds=1):
+        """Aggiorna statistiche di utilizzo"""
+        if node_name == 'group1-node2':
+            current_hour = time.strftime("%H")
+            if current_hour not in self.hour_usage:
+                self.hour_usage[current_hour] = 0
+                
+            self.hour_usage[current_hour] += seconds
+            self.daily_node2_time += seconds
+            self.daily_cost += NODE2_COST_PER_SECOND * seconds
+            self.consecutive_time_on_node2 += seconds
+        else:
+            self.consecutive_time_on_node2 = 0  # Reset se non siamo su nodo 2
+            
+    def get_cost_report(self):
+        """Genera report sui costi"""
+        current_hour = time.strftime("%H")
+        hour_usage = self.hour_usage.get(current_hour, 0)
+        
+        return {
+            'daily_cost': self.daily_cost,
+            'daily_budget_remaining': NODE2_DAILY_BUDGET - self.daily_cost,
+            'hour_usage': hour_usage,
+            'hour_budget_remaining': NODE2_MAX_TIME_PER_HOUR - hour_usage,
+            'consecutive_time': self.consecutive_time_on_node2,
+            'consecutive_remaining': NODE2_MAX_CONSECUTIVE_TIME - self.consecutive_time_on_node2
+        }
+
+def decide_node_with_cost_control(fps_prediction, current_node, time_on_node, cost_manager):
     """
-    Decide se cambiare nodo basandosi sulla predizione FPS
+    Decide se cambiare nodo considerando FPS e vincoli di costo per nodo 2
     
     Args:
-        fps_prediction: FPS predetto (può essere min, mean, o array)
-        threshold_fps: soglia FPS minima accettabile
-        current_node: nodo attualmente in uso
+        fps_prediction: FPS predetto
+        current_node: nodo attualmente in uso  
         time_on_node: tempo trascorso sul nodo corrente
-        available_nodes: lista dei nodi disponibili
+        cost_manager: gestore dei costi
         
     Returns:
-        action: 'keep', 'switch', 'optimize'
-        new_node: nuovo nodo (se switch)
+        action: 'keep', 'switch_to_node2', 'switch_to_node1', 'force_node1'
+        new_node: nuovo nodo
         updated_time: tempo aggiornato
+        reason: motivo della decisione
     """
-    if available_nodes is None:
-        available_nodes = ['group1-node1', 'group1-node2']
     
-    current_time = time.time()
+    # === LOGICA DI DECISIONE ===
     
-    # Se FPS predetto è sotto soglia e sono passati abbastanza secondi dal ultimo switch
-    if fps_prediction < threshold_fps and time_on_node >= NODE_SWITCH_COOLDOWN:
-        # Scegli un nodo diverso (round-robin semplice)
-        available_alternatives = [n for n in available_nodes if n != current_node]
-        if available_alternatives:
-            new_node = random.choice(available_alternatives)
-            print(f"⚠️  FPS predetto ({fps_prediction:.1f}) sotto soglia ({threshold_fps}). Switch da {current_node} a {new_node}")
-            return 'switch', new_node, 0  # reset time_on_node
+    # 1. Se siamo già su nodo 2, verifichiamo se possiamo continuare
+    if current_node == 'group1-node2':
+        
+        # Se FPS è tornato buono, torna a nodo 1 per risparmiare
+        if fps_prediction >= THRESHOLD_FPS_GOOD and time_on_node >= 3:  # Switch più veloce
+            print(f"💚 FPS migliorato ({fps_prediction:.1f}≥{THRESHOLD_FPS_GOOD}) - torno a nodo 1 per risparmiare")
+            return 'switch_to_node1', 'group1-node1', 0, "risparmio_costo"
+        
+        # Strategia aggressiva: dopo 20s su nodo 2, torna a nodo 1 se FPS non è critico
+        if time_on_node >= 20 and fps_prediction >= THRESHOLD_FPS_CRITICAL:
+            print(f"💸 Limito costo: 20s su nodo 2, FPS non critico ({fps_prediction:.1f}) - torno a nodo 1")
+            return 'switch_to_node1', 'group1-node1', 0, "limite_costo_preventivo"
+            
+        # Se siamo al limite del tempo consecutivo, forza switch a nodo 1
+        if cost_manager.consecutive_time_on_node2 >= NODE2_MAX_CONSECUTIVE_TIME:
+            print(f"⏱️ Limite tempo consecutivo raggiunto ({NODE2_MAX_CONSECUTIVE_TIME}s) - forzo switch a nodo 1")
+            return 'force_node1', 'group1-node1', 0, "limite_tempo_consecutivo"
+            
+        # Altrimenti continua su nodo 2
+        print(f"🔄 Continuo su nodo 2 - FPS: {fps_prediction:.1f} (t={time_on_node}s)")
+        return 'keep', current_node, time_on_node + 1, "performance_non_ottimale"
     
-    # Se FPS è buono ma potrebbe migliorare
-    elif fps_prediction > threshold_fps * 1.2:  # 20% sopra soglia
-        print(f"✅ FPS predetto ({fps_prediction:.1f}) buono su {current_node}")
-        return 'keep', current_node, time_on_node + 1
-    
-    # FPS accettabile ma non ottimale
-    else:
-        print(f"⚡ FPS predetto ({fps_prediction:.1f}) accettabile su {current_node}, possibile ottimizzazione")
-        return 'optimize', current_node, time_on_node + 1
-    
-    return 'keep', current_node, time_on_node + 1
+    # 2. Se siamo su nodo 1, verifichiamo se serve switch a nodo 2
+    else:  # current_node == 'group1-node1'
+        
+        # Se FPS è buono, resta su nodo 1
+        if fps_prediction >= THRESHOLD_FPS_GOOD:
+            print(f"✅ FPS buono ({fps_prediction:.1f}) su nodo 1 - continuo")
+            return 'keep', current_node, time_on_node + 1, "performance_buona"
+            
+        # Se FPS è problematico, controlla se possiamo usare nodo 2
+        elif fps_prediction < THRESHOLD_FPS_LOW and time_on_node >= NODE_SWITCH_COOLDOWN:
+            
+            can_use, reason = cost_manager.can_use_node2(fps_prediction, 0)
+            
+            if can_use:
+                print(f"⚠️ {reason}")
+                return 'switch_to_node2', 'group1-node2', 0, "fps_basso_switch_permesso"
+            else:
+                print(f"⚠️ FPS basso ({fps_prediction:.1f}) ma {reason}")
+                return 'keep', current_node, time_on_node + 1, "fps_basso_ma_vincoli_costo"
+        
+        # FPS non ottimale ma non abbastanza basso per switch
+        else:
+            print(f"⚡ FPS accettabile ({fps_prediction:.1f}) su nodo 1")
+            return 'keep', current_node, time_on_node + 1, "performance_accettabile"
 
-def simulate_real_time_prediction(model, scaler, initial_data):
+def simulate_real_time_prediction_with_cost_control(model, scaler, initial_data):
     """
-    Simula predizioni in tempo reale e decisioni di switching
+    Simula predizioni in tempo reale con gestione costi del nodo 2
     """
-    current_node = 'group1-node1'
+    current_node = 'group1-node1'  # Inizia sempre con nodo economico
     time_on_node = 0
+    cost_manager = CostManager()
     
     # Buffer per mantenere le ultime SEQ_LENGTH osservazioni
     data_buffer = initial_data[-SEQ_LENGTH:].copy()
     
-    print("🚀 Avvio simulazione predizioni FPS in tempo reale...")
-    print(f"Nodo iniziale: {current_node}")
-    print("-" * 60)
+    print("🚀 Simulazione FPS con Gestione Costi Nodo 2")
+    print("=" * 70)
+    print(f"💰 Budget giornaliero: €{NODE2_DAILY_BUDGET}")
+    print(f"⏱️  Limite orario nodo 2: {NODE2_MAX_TIME_PER_HOUR}s/h")
+    print(f"⏳ Limite consecutivo nodo 2: {NODE2_MAX_CONSECUTIVE_TIME}s")
+    print(f"🎯 Soglie FPS: Critica={THRESHOLD_FPS_CRITICAL}, Bassa={THRESHOLD_FPS_LOW}, Buona={THRESHOLD_FPS_GOOD}")
+    print(f"🏁 Nodo iniziale: {current_node}")
+    print("-" * 70)
     
     for step in range(50):  # Simula 50 step temporali
-        # Prepara input per predizione - applica scaler riga per riga poi reshape
-        scaled_buffer = scaler.transform(data_buffer)  # shape: (SEQ_LENGTH, n_features)
-        input_sequence = scaled_buffer.reshape(1, SEQ_LENGTH, -1)  # shape: (1, SEQ_LENGTH, n_features)
+        # Prepara input per predizione
+        scaled_buffer = scaler.transform(data_buffer)
+        input_sequence = scaled_buffer.reshape(1, SEQ_LENGTH, -1)
         input_tensor = torch.tensor(input_sequence, dtype=torch.float32).to(DEVICE)
         
         # Predizione multi-step
@@ -284,25 +403,55 @@ def simulate_real_time_prediction(model, scaler, initial_data):
         fps_min = fps_pred_multi.min()
         fps_mean = fps_pred_multi.mean()
         
-        # Decisione node switching
-        action, current_node, time_on_node = decide_node(
-            fps_min, THRESHOLD_FPS, current_node, time_on_node
+        # Simula FPS variabili per testare meglio la logica
+        if step < 15:
+            fps_simulated = 12 + random.uniform(-2, 2)  # FPS critici inizialmente
+        elif step < 25:
+            fps_simulated = 22 + random.uniform(-3, 3)  # FPS bassi 
+        elif step < 35:
+            fps_simulated = 38 + random.uniform(-5, 5)  # FPS buoni
+        else:
+            fps_simulated = 28 + random.uniform(-8, 8)  # FPS variabili
+        
+        # Decisione node switching con controllo costi
+        action, new_node, new_time_on_node, reason = decide_node_with_cost_control(
+            fps_simulated, current_node, time_on_node, cost_manager
         )
         
-        # Simula nuova osservazione (in realtà dovresti leggere dati reali)
-        new_observation = generate_next_observation(data_buffer[-1])
+        # Aggiorna statistiche costi
+        cost_manager.update_usage(current_node, 1)
         
-        # Aggiorna buffer (sliding window)
+        # Applica la decisione
+        if new_node != current_node:
+            print(f"🔄 SWITCH: {current_node} → {new_node} (Motivo: {reason})")
+            
+        current_node = new_node
+        time_on_node = new_time_on_node
+        
+        # Simula nuova osservazione
+        new_observation = generate_next_observation(data_buffer[-1])
         data_buffer = np.vstack([data_buffer[1:], new_observation])
         
-        # Log stato
-        if step % 5 == 0 or action == 'switch':
-            print(f"Step {step:2d}: FPS pred min/mean: {fps_min:.1f}/{fps_mean:.1f} | "
-                  f"Nodo: {current_node} | Azione: {action} | Tempo su nodo: {time_on_node}")
+        # Log dettagliato ogni 5 step o quando c'è un'azione importante
+        if step % 5 == 0 or action.startswith('switch') or action == 'force_node1':
+            cost_report = cost_manager.get_cost_report()
+            
+            print(f"Step {step:2d}: FPS {fps_simulated:.1f} | Nodo: {current_node} | "
+                  f"Azione: {action}")
+            print(f"        💰 Costo: €{cost_report['daily_cost']:.2f}/{NODE2_DAILY_BUDGET} | "
+                  f"⏱️ Uso orario: {cost_report['hour_usage']}/{NODE2_MAX_TIME_PER_HOUR}s | "
+                  f"⏳ Consecutivo: {cost_report['consecutive_time']}s")
         
         time.sleep(0.1)  # Simula delay temporale
     
-    print("-" * 60)
+    # Report finale
+    final_report = cost_manager.get_cost_report()
+    print("-" * 70)
+    print("📊 REPORT FINALE COSTI")
+    print(f"💰 Costo totale giornaliero: €{final_report['daily_cost']:.2f}")
+    print(f"💳 Budget rimanente: €{final_report['daily_budget_remaining']:.2f}")
+    print(f"⏱️  Tempo totale su nodo 2: {cost_manager.daily_node2_time}s")
+    print(f"📈 Efficienza costo: {(final_report['daily_cost']/NODE2_DAILY_BUDGET*100):.1f}% del budget usato")
     print("✅ Simulazione completata")
 
 def generate_next_observation(last_obs):
@@ -352,9 +501,9 @@ def main():
     
     print(f"Training completato! Loss finale: {train_losses[-1]:.4f}")
     
-    # 4. Simulazione tempo reale
-    print("⏱️  Avvio simulazione tempo reale...")
-    simulate_real_time_prediction(model, scaler, data)
+    # 4. Simulazione tempo reale con controllo costi
+    print("⏱️  Avvio simulazione con gestione costi...")
+    simulate_real_time_prediction_with_cost_control(model, scaler, data)
 
 if __name__ == "__main__":
     main()
