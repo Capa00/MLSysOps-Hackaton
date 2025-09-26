@@ -21,7 +21,7 @@ PRED_HORIZON = 10
 HIDDEN_SIZE = 64
 NUM_LAYERS = 2
 LEARNING_RATE = 0.001
-EPOCHS = 200
+EPOCHS = 500
 BATCH_SIZE = 32
 
 def create_sequences_multi_step(data, seq_length, pred_horizon=10):
@@ -92,6 +92,7 @@ def load_real_data(csv_path):
     
     # 4. Frame classify latency (latenza di classificazione)
     frame_latency_cols = [col for col in df.columns if 'frame_classify_latency' in col]
+    print(f"Trovate colonne frame_classify_latency: {frame_latency_cols}")
     if frame_latency_cols:
         frame_classify_latency_mean = df[frame_latency_cols].mean(axis=1, skipna=True)
     else:
@@ -114,8 +115,8 @@ def load_real_data(csv_path):
     
     # === CALCOLO FPS ===
     # Converti latency in FPS approssimato (1/latency)
-    fps_from_frame_latency = 1.0 / (frame_classify_latency_mean + 1e-6)
-    fps_from_detector_latency = 1.0 / (detector_latency_mean + 1e-6)
+    fps_from_frame_latency = 1000.0 / (frame_classify_latency_mean + 1e-6)
+    fps_from_detector_latency = 1000.0 / (detector_latency_mean + 1e-6)
     
     # Clip FPS a valori realistici
     fps_from_frame_latency = np.clip(fps_from_frame_latency, 1, 120)
@@ -217,10 +218,37 @@ def predict_future_fps(model, scaler, recent_window):
     input_tensor = torch.tensor(scaled_window.reshape(1, SEQ_LENGTH, -1), dtype=torch.float32).to(DEVICE)
 
     with torch.no_grad():
-        preds = model(input_tensor).cpu().numpy().flatten()
+        preds_normalized = model(input_tensor).cpu().numpy().flatten()
 
-    return preds
+    # Denormalizza le predizioni FPS (FPS è l'ultima feature, indice -1)
+    fps_mean = scaler.mean_[-1]  # Media degli FPS durante il training
+    fps_scale = scaler.scale_[-1]  # Deviazione standard degli FPS
+    preds_denormalized = preds_normalized * fps_scale + fps_mean
 
+    return preds_denormalized
+
+def save_model_pkcl(model, scaler, filename: str = "trained_model.pkcl") -> str:
+    """Salva lo state_dict del modello e lo scaler in un file .pkcl usando pickle.
+
+    Restituisce il percorso assoluto del file salvato.
+    """
+    import os
+    import pickle
+
+    # Prepara il payload da salvare
+    payload = {
+        "model_state_dict": model.state_dict(),
+        "scaler": scaler
+    }
+
+    save_dir = os.path.dirname(os.path.abspath(__file__))
+    save_path = os.path.join(save_dir, filename)
+
+    # Scrivi su disco
+    with open(save_path, "wb") as f:
+        pickle.dump(payload, f)
+
+    return save_path
 
 def main():
     """Esempio d'uso: preprocessing, training e predizione sulle ultime osservazioni."""
@@ -242,6 +270,15 @@ def main():
 
     print("Predizione FPS prossimi step:", np.round(future_fps, 2))
 
+    # === Salva modello e scaler in un file .pkcl ===
+    try:
+        save_path = save_model_pkcl(model, scaler, filename="trained_model.pkcl")
+        print(f"Modello e scaler salvati in: {save_path}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Errore nel salvataggio del modello: {exc}")
+
 
 if __name__ == "__main__":
     main()
+
+
