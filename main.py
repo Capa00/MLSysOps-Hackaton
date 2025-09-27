@@ -250,6 +250,35 @@ def save_model_pkcl(model, scaler, filename: str = "trained_model.pkcl") -> str:
 
     return save_path
 
+
+def load_model_pkcl(model_class, input_size, filename: str = "trained_model.pkcl"):
+    """Carica model_state_dict e scaler da un file .pkcl e restituisce (model, scaler).
+
+    model_class: callable da invocare come model_class(input_size, ...)
+    input_size: numero di input features per ricreare il modello
+    """
+    import os
+    import pickle
+    save_dir = os.path.dirname(os.path.abspath(__file__))
+    save_path = os.path.join(save_dir, filename)
+
+    if not os.path.exists(save_path):
+        raise FileNotFoundError(save_path)
+
+    with open(save_path, "rb") as f:
+        payload = pickle.load(f)
+
+    state = payload.get("model_state_dict")
+    scaler = payload.get("scaler")
+
+    # Ricostruisci il modello con la stessa architettura
+    model = model_class(input_size, HIDDEN_SIZE, NUM_LAYERS, PRED_HORIZON).to(DEVICE)
+    if state is not None:
+        model.load_state_dict(state)
+
+    model.eval()
+    return model, scaler
+
 def main():
     """Esempio d'uso: preprocessing, training e predizione sulle ultime osservazioni."""
     csv_path = "/Users/mariobarbieri/Developer/hack/Group1/Export Data-data-as-joinbyfield-2025-09-26 21_04_20.csv"
@@ -259,23 +288,34 @@ def main():
     except Exception as exc:  # noqa: BLE001
         print(f"⚠️  Errore nel caricamento del dataset reale ({exc}). Uso dati sintetici.")
         exit(1)
+        
+    
 
-    X_train, X_val, y_train, y_val, scaler = prepare_data(data)
-    input_size = X_train.shape[2]
-
-    model = train_model(X_train, y_train, X_val, y_val, input_size)
-
-    recent_window = data[-SEQ_LENGTH:]
-    future_fps = predict_future_fps(model, scaler, recent_window)
-
-    print("Predizione FPS prossimi step:", np.round(future_fps, 2))
-
-    # === Salva modello e scaler in un file .pkcl ===
+    # Prova a caricare un modello salvato; se non esiste, esegui prepare/train/save
+    save_filename = "trained_model.pkcl"
     try:
-        save_path = save_model_pkcl(model, scaler, filename="trained_model.pkcl")
-        print(f"Modello e scaler salvati in: {save_path}")
+        # Per ricreare il modello abbiamo bisogno di input_size; proviamo a derivarlo dai dati
+        X_train, X_val, y_train, y_val, scaler = prepare_data(data)
+        input_size = X_train.shape[2]
+
+        try:
+            model, scaler = load_model_pkcl(LSTMModelMultiStep, input_size, filename=save_filename)
+            print(f"Caricato modello esistente da: {save_filename}")
+        except FileNotFoundError:
+            # Se non trovato, esegui allenamento
+            model = train_model(X_train, y_train, X_val, y_val, input_size)
+            recent_window = data[-SEQ_LENGTH:]
+            future_fps = predict_future_fps(model, scaler, recent_window)
+            print("Predizione FPS prossimi step:", np.round(future_fps, 2))
+
+            # === Salva modello e scaler in un file .pkcl ===
+            try:
+                save_path = save_model_pkcl(model, scaler, filename=save_filename)
+                print(f"Modello e scaler salvati in: {save_path}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"Errore nel salvataggio del modello: {exc}")
     except Exception as exc:  # noqa: BLE001
-        print(f"Errore nel salvataggio del modello: {exc}")
+        print(f"Errore nella preparazione/caricamento del modello: {exc}")
 
 
 if __name__ == "__main__":
