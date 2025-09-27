@@ -7,6 +7,7 @@ import time
 import logging
 import random
 import requests
+import json
 from mlsysops.logger_util import logger
 from mlsysops.utilities import evaluate_condition
 
@@ -20,17 +21,28 @@ def initialize():
             "system_scrape_interval": "1s"
         },
         "mechanisms": ["fluidity"],
-        "packages": ["requests"],
+        "packages": ["requests", "json"],
         "configuration": {
-            "analyze_interval": "10s"
+            "analyze_interval": f"{60*1}s"
         },
         "scope": "application",
     }
 
     return initialContext
 
+def print_json(my_dict):
+    return json.dumps(my_dict, indent=2)
+
 async def analyze(context, application_description, system_description, mechanisms, telemetry, ml_connector):
-    return False
+    timestamp = time.time()
+    logger.info(f"timestamp = {timestamp}")
+    logger.info(f"context = {print_json(context)}")
+    logger.info(f"application_description = {print_json(application_description)}")
+    logger.info(f"system_description = {print_json(system_description)}")
+    logger.info(f"mechanisms = {print_json(mechanisms)}")
+    logger.info(f"telemetry = {print_json(telemetry)}")
+    logger.info(f"ml_connector = {print_json(ml_connector)}")
+    return True, context
     # # policy handles single policy, always an array with a single application
     # application_spec = application_description[0]['spec']
     # application_components = application_spec['components']
