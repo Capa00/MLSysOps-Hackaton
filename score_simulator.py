@@ -5,7 +5,7 @@ def fps_column_name():
     return "fps"
 
 def main(observations):
-    SWITCH_TIME = 1000
+    SWITCH_TIME = 1
     FPS_TRESHOLD = 10
     OBSERVATION_INTERTIME = 1000
 

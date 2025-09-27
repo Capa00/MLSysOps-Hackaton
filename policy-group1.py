@@ -9,6 +9,7 @@ import random
 import requests
 from mlsysops.logger_util import logger
 from mlsysops.utilities import evaluate_condition
+
 import traceback
 def initialize():
     print(f"Initializing policy {inspect.stack()[1].filename}")
@@ -29,81 +30,80 @@ def initialize():
     return initialContext
 
 async def analyze(context, application_description, system_description, mechanisms, telemetry, ml_connector):
-
-    # policy handles single policy, always an array with a single application
-    application_spec = application_description[0]['spec']
-    application_components = application_spec['components']
-    logger.info("Running analyzing two... ")
-    for application_component in application_components:
-        if "qos_metrics" not in application_component:
-            continue
-        component_metrics = application_component['qos_metrics']
-        for component_metric in component_metrics:
-            metric_name = component_metric['application_metric_id']
-            # Get latest values from telemetry data
-            try:
-                logger.info("Getting telemetry")
-                latest_telemetry_df = await telemetry['query']()
-                logger.info(latest_telemetry_df)
-            except Exception as e:
-                logger.error(traceback.format_exc())
-                continue
-            component_metric_target = component_metric['target']
-            component_measured_metric = latest_telemetry_df[metric_name].values[0]
-            logger.debug(
-                f"metric {metric_name} Target {component_metric_target} measurement {component_measured_metric} ")
-
-            if component_measured_metric is None:
-                continue
-
-            ml_deployment_id = "tadfasdfas"  # it works model version
-            ml_connector_endpoint = "team-grup"
-
-            resp = requests.get(f"{ml_connector_endpoint}/deployment/get/status/{ml_deployment_id}")
-            # ML mode
-            logger.info("trying ML inference")
-            if resp.status == "ready":
-                try:
-                    inference_endpoint = resp.inference_endpoint
-                    value = latest_telemetry_df['timestamp']
-                    payload = {
-                        "data": [
-                            {"time": "2025-10-09 22:20:00", "mls-compute-vm3_cpu_avg": "0.00128",
-                             "mls-compute-vm3_free_memory": "300.0"},
-                        ],
-                        "is_fun": true,
-                        "explanation": false
-                    }
-                    # payload = {
-                    #     "data": latest_telemetry_df[-10:].to_dict(orient='records')
-                    #
-                    #         # {"feat1_row1": [], "feat2_row1": []},
-                    #         # {"feat1_row2":  [], "feat2_row2":  []},
-                    #         , # timestamp in string format
-                    #         # cpu utilization all cores values: 0 - 1.0
-                    #         # available memory values: bytes
-                    #     #[],  # input features -
-                    #     "is_fun": False,
-                    #     "explanation": False
-                    # }
-                    resp = requests.post(f"{inference_endpoint}/prediction", json=payload)
-                    # expected format: {  "inference": "[34,35,36]" }
-                    response_json = resp.json()
-                    inference_result = response_json['inference']
-                    logger.warning(response_json)
-                    # auxiliary method - placeholder
-                    return True
-
-                except Exception as e:
-                    logger.error(f"Error at ML inference {e}")
-                    pass
-
-            # Heuristic mode
-            if evaluate_condition(component_metric_target,component_measured_metric, component_metric['relation']):
-                # even one telemetry metric is not fulfilled, return true
-                return True, context
-
-    return True, context
+    return False
+    # # policy handles single policy, always an array with a single application
+    # application_spec = application_description[0]['spec']
+    # application_components = application_spec['components']
+    # logger.info("Running analyzing two... ")
+    # for application_component in application_components:
+    #     if "qos_metrics" not in application_component:
+    #         continue
+    #     component_metrics = application_component['qos_metrics']
+    #     for component_metric in component_metrics:
+    #         metric_name = component_metric['application_metric_id']
+    #         # Get latest values from telemetry data
+    #         try:
+    #             logger.info("Getting telemetry")
+    #             latest_telemetry_df = await telemetry['query']()
+    #             logger.info(latest_telemetry_df)
+    #         except Exception as e:
+    #             logger.error(traceback.format_exc())
+    #             continue
+    #         component_metric_target = component_metric['target']
+    #         component_measured_metric = latest_telemetry_df[metric_name].values[0]
+    #         logger.debug(
+    #             f"metric {metric_name} Target {component_metric_target} measurement {component_measured_metric} ")
+    #
+    #         if component_measured_metric is None:
+    #             continue
+    #
+    #         ml_deployment_id = "tadfasdfas"  # it works model version
+    #         ml_connector_endpoint = "team-grup"
+    #
+    #         resp = requests.get(f"{ml_connector_endpoint}/deployment/get/status/{ml_deployment_id}")
+    #         # ML mode
+    #         logger.info("trying ML inference")
+    #         if resp.status == "ready":
+    #             try:
+    #                 inference_endpoint = resp.inference_endpoint
+    #                 value = latest_telemetry_df['timestamp']
+    #                 payload = {
+    #                     "data": [
+    #                         {"time": "2025-10-09 22:20:00", "mls-compute-vm3_cpu_avg": "0.00128",
+    #                          "mls-compute-vm3_free_memory": "300.0"},
+    #                     ],
+    #                     "is_fun": true,
+    #                     "explanation": false
+    #                 }
+    #                 # payload = {
+    #                 #     "data": latest_telemetry_df[-10:].to_dict(orient='records')
+    #                 #
+    #                 #         # {"feat1_row1": [], "feat2_row1": []},
+    #                 #         # {"feat1_row2":  [], "feat2_row2":  []},
+    #                 #         , # timestamp in string format
+    #                 #         # cpu utilization all cores values: 0 - 1.0
+    #                 #         # available memory values: bytes
+    #                 #     #[],  # input features -
+    #                 #     "is_fun": False,
+    #                 #     "explanation": False
+    #                 # }
+    #                 resp = requests.post(f"{inference_endpoint}/prediction", json=payload)
+    #                 # expected format: {  "inference": "[34,35,36]" }
+    #                 response_json = resp.json()
+    #                 inference_result = response_json['inference']
+    #                 logger.warning(response_json)
+    #                 # auxiliary method - placeholder
+    #                 return True
+    #
+    #             except Exception as e:
+    #                 logger.error(f"Error at ML inference {e}")
+    #                 pass
+    #
+    #         # Heuristic mode
+    #         if evaluate_condition(component_metric_target,component_measured_metric, component_metric['relation']):
+    #             # even one telemetry metric is not fulfilled, return true
+    #             return True, context
+    # return True, context
 
 
 async def plan(context, application_description, system_description, mechanisms, telemetry, ml_connector):
